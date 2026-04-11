@@ -1,0 +1,221 @@
+name: vens
+description: Context-aware vulnerability prioritization with OWASP risk scoring and CycloneDX VEX output
+author: venslabs
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  version:
+    description: "vens release tag to install (e.g. v0.3.1). 'latest' is not yet supported."
+    required: true
+  config-file:
+    description: "Path to config.yaml describing project context"
+    required: true
+  input-report:
+    description: "Path to the Trivy or Grype JSON scan report"
+    required: true
+  input-format:
+    description: "Scanner format: auto | trivy | grype"
+    required: false
+    default: auto
+  output-vex:
+    description: "Output path for the generated CycloneDX VEX file"
+    required: false
+    default: vens-vex.cdx.json
+  sbom-serial-number:
+    description: "BOM-Link serial (urn:uuid:...). Auto-generated if empty."
+    required: false
+    default: ""
+  sbom-version:
+    description: "BOM-Link version integer"
+    required: false
+    default: "1"
+  llm-provider:
+    description: "LLM backend: openai | anthropic | googleai | ollama | mock"
+    required: false
+    default: openai
+  llm-model:
+    description: "Model name (mapped to <PROVIDER>_MODEL env var)"
+    required: false
+    default: ""
+  llm-api-key:
+    description: "API key for the selected provider. Masked in logs."
+    required: false
+    default: ""
+  llm-base-url:
+    description: "Custom base URL (OpenAI-compatible endpoints or Ollama host)"
+    required: false
+    default: ""
+  llm-batch-size:
+    description: "Number of CVEs per LLM request"
+    required: false
+    default: "10"
+  enrich:
+    description: "If true, also produce an enriched Trivy report"
+    required: false
+    default: "false"
+  output-enriched-report:
+    description: "Output path for the enriched Trivy report (when enrich=true)"
+    required: false
+    default: vens-enriched.json
+  debug-dir:
+    description: "If set, dump LLM prompts and responses to this directory"
+    required: false
+    default: ""
+  working-directory:
+    description: "Working directory for the run"
+    required: false
+    default: "."
+
+outputs:
+  vex-file:
+    description: "Path to the generated CycloneDX VEX file"
+    value: ${{ steps.run.outputs.vex-file }}
+  enriched-report:
+    description: "Path to the enriched Trivy report (empty when enrich=false)"
+    value: ${{ steps.run.outputs.enriched-report }}
+  version:
+    description: "vens version that was installed"
+    value: ${{ inputs.version }}
+  sbom-serial-number:
+    description: "SBOM serial number that was used (useful when auto-generated)"
+    value: ${{ steps.run.outputs.sbom-serial-number }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mask secrets and guard platform
+      shell: bash
+      env:
+        INPUT_LLM_API_KEY: ${{ inputs.llm-api-key }}
+      run: |
+        set -euo pipefail
+        if [ -n "${INPUT_LLM_API_KEY}" ]; then
+          echo "::add-mask::${INPUT_LLM_API_KEY}"
+        fi
+        case "${RUNNER_OS}" in
+          Linux|macOS) ;;
+          *)
+            echo "::error::vens-action does not support ${RUNNER_OS} runners. Supported: Linux, macOS."
+            exit 1
+            ;;
+        esac
+
+    - name: Install vens
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        case "${RUNNER_OS}" in
+          Linux)  os=linux ;;
+          macOS)  os=darwin ;;
+        esac
+        case "${RUNNER_ARCH}" in
+          X64)    arch=amd64 ;;
+          ARM64)  arch=arm64 ;;
+          *)
+            echo "::error::Unsupported runner arch: ${RUNNER_ARCH}"
+            exit 1
+            ;;
+        esac
+
+        version="${INPUT_VERSION}"
+        case "${version}" in
+          v*) ;;
+          latest)
+            echo "::error::'version: latest' is not yet supported. Pin a tag like v0.3.1."
+            exit 1
+            ;;
+          *)
+            echo "::error::'version' must start with 'v' (got: ${version})"
+            exit 1
+            ;;
+        esac
+
+        tarball="vens-${version}-${os}-${arch}.tar.gz"
+        base_url="https://github.com/venslabs/vens/releases/download/${version}"
+        install_dir="${RUNNER_TEMP}/vens-${version}"
+        mkdir -p "${install_dir}"
+        cd "${install_dir}"
+
+        echo "Downloading ${tarball}"
+        curl -fsSL -o "${tarball}" "${base_url}/${tarball}"
+        curl -fsSL -o SHA256SUMS "${base_url}/SHA256SUMS"
+
+        echo "Verifying checksum"
+        grep " ${tarball}\$" SHA256SUMS > "${tarball}.sha256"
+        shasum -a 256 -c "${tarball}.sha256"
+
+        tar -xzf "${tarball}"
+        chmod +x ./vens
+
+        echo "${install_dir}" >> "${GITHUB_PATH}"
+        echo "bin=${install_dir}/vens" >> "${GITHUB_OUTPUT}"
+        ./vens --version || ./vens version || true
+
+    - name: Run vens
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_REPORT: ${{ inputs.input-report }}
+        INPUT_FORMAT: ${{ inputs.input-format }}
+        INPUT_OUTPUT_VEX: ${{ inputs.output-vex }}
+        INPUT_SBOM_SERIAL: ${{ inputs.sbom-serial-number }}
+        INPUT_SBOM_VERSION: ${{ inputs.sbom-version }}
+        INPUT_LLM_PROVIDER: ${{ inputs.llm-provider }}
+        INPUT_LLM_BATCH_SIZE: ${{ inputs.llm-batch-size }}
+        INPUT_ENRICH: ${{ inputs.enrich }}
+        INPUT_ENRICHED_OUT: ${{ inputs.output-enriched-report }}
+        INPUT_DEBUG_DIR: ${{ inputs.debug-dir }}
+        OPENAI_API_KEY: ${{ inputs.llm-provider == 'openai' && inputs.llm-api-key || '' }}
+        OPENAI_MODEL: ${{ inputs.llm-provider == 'openai' && inputs.llm-model || '' }}
+        OPENAI_BASE_URL: ${{ inputs.llm-provider == 'openai' && inputs.llm-base-url || '' }}
+        ANTHROPIC_API_KEY: ${{ inputs.llm-provider == 'anthropic' && inputs.llm-api-key || '' }}
+        ANTHROPIC_MODEL: ${{ inputs.llm-provider == 'anthropic' && inputs.llm-model || '' }}
+        GOOGLE_API_KEY: ${{ inputs.llm-provider == 'googleai' && inputs.llm-api-key || '' }}
+        GOOGLE_MODEL: ${{ inputs.llm-provider == 'googleai' && inputs.llm-model || '' }}
+        OLLAMA_MODEL: ${{ inputs.llm-provider == 'ollama' && inputs.llm-model || '' }}
+        OLLAMA_HOST: ${{ inputs.llm-provider == 'ollama' && inputs.llm-base-url || '' }}
+      run: |
+        set -euo pipefail
+
+        serial="${INPUT_SBOM_SERIAL}"
+        if [ -z "${serial}" ]; then
+          serial="urn:uuid:$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          echo "Auto-generated SBOM serial: ${serial}"
+        fi
+
+        debug_args=()
+        if [ -n "${INPUT_DEBUG_DIR}" ]; then
+          debug_args+=(--debug-dir "${INPUT_DEBUG_DIR}")
+        fi
+
+        vens generate \
+          --config-file "${INPUT_CONFIG_FILE}" \
+          --llm "${INPUT_LLM_PROVIDER}" \
+          --llm-batch-size "${INPUT_LLM_BATCH_SIZE}" \
+          --input-format "${INPUT_FORMAT}" \
+          --sbom-serial-number "${serial}" \
+          --sbom-version "${INPUT_SBOM_VERSION}" \
+          "${debug_args[@]}" \
+          "${INPUT_REPORT}" \
+          "${INPUT_OUTPUT_VEX}"
+
+        echo "vex-file=${INPUT_OUTPUT_VEX}" >> "${GITHUB_OUTPUT}"
+        echo "sbom-serial-number=${serial}" >> "${GITHUB_OUTPUT}"
+
+        if [ "${INPUT_ENRICH}" = "true" ]; then
+          vens enrich \
+            --vex "${INPUT_OUTPUT_VEX}" \
+            --output "${INPUT_ENRICHED_OUT}" \
+            "${INPUT_REPORT}"
+          echo "enriched-report=${INPUT_ENRICHED_OUT}" >> "${GITHUB_OUTPUT}"
+        else
+          echo "enriched-report=" >> "${GITHUB_OUTPUT}"
+        fi

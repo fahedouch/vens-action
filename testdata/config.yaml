@@ -1,0 +1,7 @@
+project:
+  name: "test-project"
+  description: "Fixture project used by vens-action integration tests"
+context:
+  exposure: "internet"
+  data_sensitivity: "high"
+  business_criticality: "critical"

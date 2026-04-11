@@ -1,0 +1,65 @@
+name: Test action
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - testdata/**
+      - .github/workflows/test-action.yml
+  push:
+    branches: [main]
+    paths:
+      - action.yml
+      - testdata/**
+      - .github/workflows/test-action.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run vens action
+        id: vens
+        uses: ./
+        with:
+          version: v0.3.1
+          config-file: testdata/config.yaml
+          input-report: testdata/trivy-report.json
+          input-format: trivy
+          output-vex: ${{ runner.temp }}/vex.cdx.json
+          sbom-serial-number: urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79
+          llm-provider: mock
+          enrich: "true"
+          output-enriched-report: ${{ runner.temp }}/enriched.json
+
+      - name: Assert VEX file is valid CycloneDX
+        shell: bash
+        env:
+          VEX_FILE: ${{ steps.vens.outputs.vex-file }}
+        run: |
+          set -euo pipefail
+          test -s "${VEX_FILE}"
+          jq -e '.bomFormat == "CycloneDX"' "${VEX_FILE}"
+          jq -e '.specVersion | startswith("1.")' "${VEX_FILE}"
+          jq -e '.vulnerabilities | length > 0' "${VEX_FILE}"
+          jq -e '[.vulnerabilities[] | select(.id == "CVE-2024-1234")] | length == 1' "${VEX_FILE}"
+
+      - name: Assert enriched report exists
+        shell: bash
+        env:
+          ENRICHED: ${{ steps.vens.outputs.enriched-report }}
+        run: |
+          set -euo pipefail
+          test -n "${ENRICHED}"
+          test -s "${ENRICHED}"
+          jq -e '.Results[0].Vulnerabilities[0].VulnerabilityID == "CVE-2024-1234"' "${ENRICHED}"
