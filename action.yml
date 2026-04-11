@@ -7,8 +7,13 @@ branding:
 
 inputs:
   version:
-    description: "vens release tag to install (e.g. v0.3.1). 'latest' is not yet supported."
-    required: true
+    description: "vens release tag to install (e.g. v0.3.1). Ignored when 'bin-path' is set. 'latest' is not yet supported."
+    required: false
+    default: ""
+  bin-path:
+    description: "Path to a pre-installed vens binary. When set, skips download and checksum verification. Useful for air-gapped environments and custom builds."
+    required: false
+    default: ""
   config-file:
     description: "Path to config.yaml describing project context"
     required: true
@@ -77,7 +82,7 @@ outputs:
     value: ${{ steps.run.outputs.enriched-report }}
   version:
     description: "vens version that was installed"
-    value: ${{ inputs.version }}
+    value: ${{ steps.install.outputs.version }}
   sbom-serial-number:
     description: "SBOM serial number that was used (useful when auto-generated)"
     value: ${{ steps.run.outputs.sbom-serial-number }}
@@ -107,8 +112,28 @@ runs:
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BIN_PATH: ${{ inputs.bin-path }}
       run: |
         set -euo pipefail
+
+        if [ -n "${INPUT_BIN_PATH}" ]; then
+          if [ ! -x "${INPUT_BIN_PATH}" ]; then
+            echo "::error::bin-path does not exist or is not executable: ${INPUT_BIN_PATH}"
+            exit 1
+          fi
+          bin_dir=$(cd "$(dirname "${INPUT_BIN_PATH}")" && pwd)
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          resolved=$("${INPUT_BIN_PATH}" --version 2>&1 | awk '{for(i=1;i<=NF;i++) if ($i ~ /^v[0-9]/) {print $i; exit}}')
+          echo "bin=${INPUT_BIN_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "version=${resolved:-unknown}" >> "${GITHUB_OUTPUT}"
+          echo "Using pre-installed vens at ${INPUT_BIN_PATH} (version: ${resolved:-unknown})"
+          exit 0
+        fi
+
+        if [ -z "${INPUT_VERSION}" ]; then
+          echo "::error::One of 'version' or 'bin-path' must be set."
+          exit 1
+        fi
 
         case "${RUNNER_OS}" in
           Linux)  os=linux ;;
@@ -124,17 +149,14 @@ runs:
         esac
 
         version="${INPUT_VERSION}"
-        case "${version}" in
-          v*) ;;
-          latest)
-            echo "::error::'version: latest' is not yet supported. Pin a tag like v0.3.1."
-            exit 1
-            ;;
-          *)
-            echo "::error::'version' must start with 'v' (got: ${version})"
-            exit 1
-            ;;
-        esac
+        if [ "${version}" = "latest" ]; then
+          echo "::error::'version: latest' is not yet supported. Pin a tag like v0.3.1."
+          exit 1
+        fi
+        if ! printf '%s' "${version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+          echo "::error::Invalid 'version' input: ${version}. Expected semver tag like v0.3.1."
+          exit 1
+        fi
 
         tarball="vens-${version}-${os}-${arch}.tar.gz"
         base_url="https://github.com/venslabs/vens/releases/download/${version}"
@@ -143,11 +165,15 @@ runs:
         cd "${install_dir}"
 
         echo "Downloading ${tarball}"
-        curl -fsSL -o "${tarball}" "${base_url}/${tarball}"
-        curl -fsSL -o SHA256SUMS "${base_url}/SHA256SUMS"
+        curl -fsSL --proto '=https' --tlsv1.2 -o "${tarball}" "${base_url}/${tarball}"
+        curl -fsSL --proto '=https' --tlsv1.2 -o SHA256SUMS "${base_url}/SHA256SUMS"
 
         echo "Verifying checksum"
-        grep " ${tarball}\$" SHA256SUMS > "${tarball}.sha256"
+        grep -F "  ${tarball}" SHA256SUMS > "${tarball}.sha256"
+        if [ ! -s "${tarball}.sha256" ]; then
+          echo "::error::Could not find ${tarball} in SHA256SUMS"
+          exit 1
+        fi
         shasum -a 256 -c "${tarball}.sha256"
 
         tar -xzf "${tarball}"
@@ -155,7 +181,8 @@ runs:
 
         echo "${install_dir}" >> "${GITHUB_PATH}"
         echo "bin=${install_dir}/vens" >> "${GITHUB_OUTPUT}"
-        ./vens --version || ./vens version || true
+        echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        ./vens --version
 
     - name: Run vens
       id: run
@@ -173,39 +200,67 @@ runs:
         INPUT_ENRICH: ${{ inputs.enrich }}
         INPUT_ENRICHED_OUT: ${{ inputs.output-enriched-report }}
         INPUT_DEBUG_DIR: ${{ inputs.debug-dir }}
-        OPENAI_API_KEY: ${{ inputs.llm-provider == 'openai' && inputs.llm-api-key || '' }}
-        OPENAI_MODEL: ${{ inputs.llm-provider == 'openai' && inputs.llm-model || '' }}
-        OPENAI_BASE_URL: ${{ inputs.llm-provider == 'openai' && inputs.llm-base-url || '' }}
-        ANTHROPIC_API_KEY: ${{ inputs.llm-provider == 'anthropic' && inputs.llm-api-key || '' }}
-        ANTHROPIC_MODEL: ${{ inputs.llm-provider == 'anthropic' && inputs.llm-model || '' }}
-        GOOGLE_API_KEY: ${{ inputs.llm-provider == 'googleai' && inputs.llm-api-key || '' }}
-        GOOGLE_MODEL: ${{ inputs.llm-provider == 'googleai' && inputs.llm-model || '' }}
-        OLLAMA_MODEL: ${{ inputs.llm-provider == 'ollama' && inputs.llm-model || '' }}
-        OLLAMA_HOST: ${{ inputs.llm-provider == 'ollama' && inputs.llm-base-url || '' }}
+        INPUT_LLM_API_KEY: ${{ inputs.llm-api-key }}
+        INPUT_LLM_MODEL: ${{ inputs.llm-model }}
+        INPUT_LLM_BASE_URL: ${{ inputs.llm-base-url }}
       run: |
         set -euo pipefail
 
+        if [ -n "${INPUT_LLM_API_KEY}" ]; then
+          echo "::add-mask::${INPUT_LLM_API_KEY}"
+        fi
+
+        case "${INPUT_LLM_PROVIDER}" in
+          openai)
+            export OPENAI_API_KEY="${INPUT_LLM_API_KEY}"
+            export OPENAI_MODEL="${INPUT_LLM_MODEL}"
+            export OPENAI_BASE_URL="${INPUT_LLM_BASE_URL}"
+            ;;
+          anthropic)
+            export ANTHROPIC_API_KEY="${INPUT_LLM_API_KEY}"
+            export ANTHROPIC_MODEL="${INPUT_LLM_MODEL}"
+            ;;
+          googleai)
+            export GOOGLE_API_KEY="${INPUT_LLM_API_KEY}"
+            export GOOGLE_MODEL="${INPUT_LLM_MODEL}"
+            ;;
+          ollama)
+            export OLLAMA_MODEL="${INPUT_LLM_MODEL}"
+            export OLLAMA_HOST="${INPUT_LLM_BASE_URL}"
+            ;;
+          mock)
+            ;;
+          *)
+            echo "::error::Unknown llm-provider: ${INPUT_LLM_PROVIDER}. Expected openai|anthropic|googleai|ollama|mock."
+            exit 1
+            ;;
+        esac
+
         serial="${INPUT_SBOM_SERIAL}"
         if [ -z "${serial}" ]; then
-          serial="urn:uuid:$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          if command -v uuidgen >/dev/null 2>&1; then
+            serial="urn:uuid:$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          elif [ -r /proc/sys/kernel/random/uuid ]; then
+            serial="urn:uuid:$(cat /proc/sys/kernel/random/uuid)"
+          else
+            serial="urn:uuid:$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          fi
           echo "Auto-generated SBOM serial: ${serial}"
         fi
 
-        debug_args=()
+        generate_args=(
+          --config-file "${INPUT_CONFIG_FILE}"
+          --llm "${INPUT_LLM_PROVIDER}"
+          --llm-batch-size "${INPUT_LLM_BATCH_SIZE}"
+          --input-format "${INPUT_FORMAT}"
+          --sbom-serial-number "${serial}"
+          --sbom-version "${INPUT_SBOM_VERSION}"
+        )
         if [ -n "${INPUT_DEBUG_DIR}" ]; then
-          debug_args+=(--debug-dir "${INPUT_DEBUG_DIR}")
+          generate_args+=(--debug-dir "${INPUT_DEBUG_DIR}")
         fi
 
-        vens generate \
-          --config-file "${INPUT_CONFIG_FILE}" \
-          --llm "${INPUT_LLM_PROVIDER}" \
-          --llm-batch-size "${INPUT_LLM_BATCH_SIZE}" \
-          --input-format "${INPUT_FORMAT}" \
-          --sbom-serial-number "${serial}" \
-          --sbom-version "${INPUT_SBOM_VERSION}" \
-          "${debug_args[@]}" \
-          "${INPUT_REPORT}" \
-          "${INPUT_OUTPUT_VEX}"
+        vens generate "${generate_args[@]}" "${INPUT_REPORT}" "${INPUT_OUTPUT_VEX}"
 
         echo "vex-file=${INPUT_OUTPUT_VEX}" >> "${GITHUB_OUTPUT}"
         echo "sbom-serial-number=${serial}" >> "${GITHUB_OUTPUT}"

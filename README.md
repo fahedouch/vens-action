@@ -33,7 +33,8 @@ Drop this action into your pipeline after a Trivy or Grype scan step to get a co
 
 | Name | Required | Default | Description |
 |---|---|---|---|
-| `version` | yes | — | vens release tag to install (e.g. `v0.3.1`). `latest` is not yet supported. |
+| `version` | yes* | — | vens release tag to install (e.g. `v0.3.1`). Ignored when `bin-path` is set. `latest` is not yet supported. |
+| `bin-path` | yes* | — | Path to a pre-installed vens binary. Skips download and checksum verification. Useful for air-gapped environments and custom builds. |
 | `config-file` | yes | — | Path to `config.yaml` describing project context (exposure, data sensitivity, etc.). |
 | `input-report` | yes | — | Path to the Trivy or Grype JSON scan report. |
 | `input-format` | no | `auto` | Scanner format: `auto` \| `trivy` \| `grype`. |
@@ -49,6 +50,8 @@ Drop this action into your pipeline after a Trivy or Grype scan step to get a co
 | `output-enriched-report` | no | `vens-enriched.json` | Output path for the enriched report. |
 | `debug-dir` | no | — | Dump LLM prompts and responses to this directory. |
 | `working-directory` | no | `.` | Working directory for the run. |
+
+\* One of `version` or `bin-path` must be set.
 
 ## Outputs
 

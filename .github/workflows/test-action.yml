@@ -1,3 +1,9 @@
+# TODO(phase-2): once a vens release tag ships the --llm=mock backend
+# (added in venslabs/vens commit 1600aaf, not yet tagged as of v0.3.1),
+# drop the checkout/build preamble and use:
+#   version: vX.Y.Z
+#   llm-provider: mock
+# directly, without `bin-path`.
 name: Test action
 
 on:
@@ -26,13 +32,38 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout vens-action
+        uses: actions/checkout@v4
+
+      - name: Checkout vens main
+        uses: actions/checkout@v4
+        with:
+          repository: venslabs/vens
+          ref: main
+          path: .vens-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .vens-src/go.mod
+          cache-dependency-path: .vens-src/go.sum
+
+      - name: Build vens from main
+        id: build
+        shell: bash
+        working-directory: .vens-src
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/vens-bin"
+          go build -o "${RUNNER_TEMP}/vens-bin/vens" ./cmd/vens
+          "${RUNNER_TEMP}/vens-bin/vens" version
+          echo "bin=${RUNNER_TEMP}/vens-bin/vens" >> "${GITHUB_OUTPUT}"
 
       - name: Run vens action
         id: vens
         uses: ./
         with:
-          version: v0.3.1
+          bin-path: ${{ steps.build.outputs.bin }}
           config-file: testdata/config.yaml
           input-report: testdata/trivy-report.json
           input-format: trivy
@@ -54,7 +85,7 @@ jobs:
           jq -e '.vulnerabilities | length > 0' "${VEX_FILE}"
           jq -e '[.vulnerabilities[] | select(.id == "CVE-2024-1234")] | length == 1' "${VEX_FILE}"
 
-      - name: Assert enriched report exists
+      - name: Assert enriched report
         shell: bash
         env:
           ENRICHED: ${{ steps.vens.outputs.enriched-report }}
@@ -63,3 +94,35 @@ jobs:
           test -n "${ENRICHED}"
           test -s "${ENRICHED}"
           jq -e '.Results[0].Vulnerabilities[0].VulnerabilityID == "CVE-2024-1234"' "${ENRICHED}"
+
+  install-smoke:
+    name: install-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify v0.3.1 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}" in
+            Linux)  os=linux ;;
+            macOS)  os=darwin ;;
+          esac
+          case "${RUNNER_ARCH}" in
+            X64)    arch=amd64 ;;
+            ARM64)  arch=arm64 ;;
+          esac
+          version="v0.3.1"
+          tarball="vens-${version}-${os}-${arch}.tar.gz"
+          url="https://github.com/venslabs/vens/releases/download/${version}"
+          cd "${RUNNER_TEMP}"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "${tarball}" "${url}/${tarball}"
+          curl -fsSL --proto '=https' --tlsv1.2 -o SHA256SUMS "${url}/SHA256SUMS"
+          grep -F "  ${tarball}" SHA256SUMS > "${tarball}.sha256"
+          shasum -a 256 -c "${tarball}.sha256"
+          tar -xzf "${tarball}"
+          ./vens --version
